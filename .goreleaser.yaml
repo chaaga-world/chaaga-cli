@@ -1,0 +1,60 @@
+version: 2
+
+project_name: chaaga
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: chaaga
+    main: .
+    binary: chaaga
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X github.com/chaaga-world/chaaga-cli/cmd.Version={{.Version}}
+
+archives:
+  - id: chaaga
+    name_template: "chaaga_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - install.sh
+      - install.ps1
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+release:
+  github:
+    owner: chaaga-world
+    name: chaaga-cli
+  draft: false
+  prerelease: auto
+  name_template: "chaaga v{{.Version}}"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - Merge pull request
+      - Merge branch
