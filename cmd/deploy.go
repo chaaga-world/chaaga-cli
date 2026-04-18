@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"github.com/chaaga-world/chaaga-cli/internal/api"
-	"github.com/chaaga-world/chaaga-cli/internal/auth"
 	"github.com/chaaga-world/chaaga-cli/internal/config"
 	"github.com/chaaga-world/chaaga-cli/internal/files"
 	"github.com/spf13/cobra"
@@ -30,7 +29,7 @@ Files larger than 5 MB and dotfiles are skipped.`,
 	}
 }
 
-func runDeploy(cmd *cobra.Command, args []string) error {
+func runDeploy(_ *cobra.Command, args []string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -45,11 +44,6 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-
-	token, err := auth.EnsureToken(cfg)
 	if err != nil {
 		return err
 	}
@@ -70,6 +64,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return enc.Encode(entries)
 	}
 
+	return resolveToken(cfg, func(token string) error {
+		return doDeploy(cfg, token, appname, entries)
+	})
+}
+
+func doDeploy(cfg *config.Config, token, appname string, entries []files.FileEntry) error {
 	client := api.New(cfg.API, token)
 
 	me, err := client.GetMe()
@@ -88,7 +88,6 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Build path → absPath lookup
 	absOf := make(map[string]string, len(entries))
 	for _, e := range entries {
 		absOf[e.Path] = e.AbsPath

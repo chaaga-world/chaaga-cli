@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,9 @@ import (
 
 	"github.com/chaaga-world/chaaga-cli/internal/files"
 )
+
+// ErrUnauthorized is returned on any 401 response so callers can trigger re-login.
+var ErrUnauthorized = errors.New("session expired")
 
 type Client struct {
 	Base        string
@@ -43,8 +47,6 @@ func (c *Client) EnsureApp(slug string) error {
 		fmt.Fprintf(os.Stderr, "  created app '%s'\n", slug)
 	case http.StatusUnprocessableEntity:
 		fmt.Fprintf(os.Stderr, "  using existing app '%s'\n", slug)
-	case http.StatusUnauthorized:
-		return fmt.Errorf("unauthorized — delete your token file and rerun to log in again")
 	default:
 		b, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("create app failed (%d): %s", resp.StatusCode, b)
@@ -207,9 +209,6 @@ func (c *Client) ListFiles(slug string) ([]RemoteFile, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, fmt.Errorf("unauthorized — delete your token file and rerun to log in again")
-	}
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("app '%s' not found", slug)
 	}
@@ -256,5 +255,13 @@ func (c *Client) do(method, path string, body []byte) (*http.Response, error) {
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
-	return c.http.Do(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		resp.Body.Close()
+		return nil, ErrUnauthorized
+	}
+	return resp, nil
 }

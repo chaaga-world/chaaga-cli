@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/chaaga-world/chaaga-cli/internal/api"
-	"github.com/chaaga-world/chaaga-cli/internal/auth"
 	"github.com/chaaga-world/chaaga-cli/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -43,10 +42,6 @@ func runPull(appname, outputDir string, force bool) error {
 	if err != nil {
 		return err
 	}
-	token, err := auth.EnsureToken(cfg)
-	if err != nil {
-		return err
-	}
 
 	if outputDir == "" {
 		outputDir, err = os.Getwd()
@@ -55,51 +50,52 @@ func runPull(appname, outputDir string, force bool) error {
 		}
 	}
 
-	client := api.New(cfg.API, token)
+	return resolveToken(cfg, func(token string) error {
+		client := api.New(cfg.API, token)
 
-	fmt.Fprintf(os.Stderr, "Listing files for '%s'...\n", appname)
-	remoteFiles, err := client.ListFiles(appname)
-	if err != nil {
-		return err
-	}
-	if len(remoteFiles) == 0 {
-		fmt.Fprintln(os.Stderr, "No files found.")
-		return nil
-	}
-	fmt.Fprintf(os.Stderr, "  %d remote file(s)\n", len(remoteFiles))
-
-	skipped := 0
-	for _, rf := range remoteFiles {
-		// Guard against path traversal
-		if strings.Contains(rf.Path, "..") {
-			fmt.Fprintf(os.Stderr, "  skip (suspicious path): %s\n", rf.Path)
-			continue
+		fmt.Fprintf(os.Stderr, "Listing files for '%s'...\n", appname)
+		remoteFiles, err := client.ListFiles(appname)
+		if err != nil {
+			return err
 		}
+		if len(remoteFiles) == 0 {
+			fmt.Fprintln(os.Stderr, "No files found.")
+			return nil
+		}
+		fmt.Fprintf(os.Stderr, "  %d remote file(s)\n", len(remoteFiles))
 
-		dest := filepath.Join(outputDir, filepath.FromSlash(rf.Path))
-
-		if !force {
-			if _, err := os.Stat(dest); err == nil {
-				fmt.Fprintf(os.Stderr, "  skip (exists): %s\n", rf.Path)
-				skipped++
+		skipped := 0
+		for _, rf := range remoteFiles {
+			if strings.Contains(rf.Path, "..") {
+				fmt.Fprintf(os.Stderr, "  skip (suspicious path): %s\n", rf.Path)
 				continue
 			}
+
+			dest := filepath.Join(outputDir, filepath.FromSlash(rf.Path))
+
+			if !force {
+				if _, err := os.Stat(dest); err == nil {
+					fmt.Fprintf(os.Stderr, "  skip (exists): %s\n", rf.Path)
+					skipped++
+					continue
+				}
+			}
+
+			if err := downloadTo(client, appname, rf.Path, dest); err != nil {
+				return fmt.Errorf("download %s: %w", rf.Path, err)
+			}
+			fmt.Fprintf(os.Stderr, "  ok   %s\n", rf.Path)
 		}
 
-		if err := downloadTo(client, appname, rf.Path, dest); err != nil {
-			return fmt.Errorf("download %s: %w", rf.Path, err)
+		fmt.Println()
+		if skipped > 0 {
+			fmt.Printf("  Pulled %d file(s) (%d skipped, use --force to overwrite).\n",
+				len(remoteFiles)-skipped, skipped)
+		} else {
+			fmt.Printf("  Pulled %d file(s) to %s\n", len(remoteFiles), outputDir)
 		}
-		fmt.Fprintf(os.Stderr, "  ok   %s\n", rf.Path)
-	}
-
-	fmt.Println()
-	if skipped > 0 {
-		fmt.Printf("  Pulled %d file(s) (%d skipped, use --force to overwrite).\n",
-			len(remoteFiles)-skipped, skipped)
-	} else {
-		fmt.Printf("  Pulled %d file(s) to %s\n", len(remoteFiles), outputDir)
-	}
-	return nil
+		return nil
+	})
 }
 
 func downloadTo(client *api.Client, slug, remotePath, dest string) error {

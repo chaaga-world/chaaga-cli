@@ -35,10 +35,22 @@ func EnsureToken(cfg *config.Config) (string, error) {
 	if t != "" {
 		return t, nil
 	}
+	return login(cfg)
+}
+
+// RefreshToken deletes the stored token and forces a new device-code login.
+// Call this when the API returns ErrUnauthorized.
+func RefreshToken(cfg *config.Config) (string, error) {
+	fmt.Fprintln(os.Stderr, "Session expired. Logging in again...")
+	_ = Logout(cfg.TokenPath)
+	return login(cfg)
+}
+
+func login(cfg *config.Config) (string, error) {
 	if err := deviceLogin(cfg); err != nil {
 		return "", err
 	}
-	t = ReadToken(cfg.TokenPath)
+	t := ReadToken(cfg.TokenPath)
 	if t == "" {
 		return "", fmt.Errorf("login succeeded but token not found at %s", cfg.TokenPath)
 	}
