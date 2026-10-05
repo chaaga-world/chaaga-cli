@@ -50,6 +50,7 @@ func parseCommand(name string, args []string, min, max int, setup func(*flag.Fla
 var commandUsage = map[string]string{
 	"connect": "connect [<phone-ip>]",
 	"apps":    "apps [--json]",
+	"agents":  "agents",
 	"new":     `new <folder> <name> [<emoji>]   (quote names with spaces: "My Game")`,
 	"link":    "link <folder> <appId>",
 	"pull":    "pull <folder>",
@@ -145,6 +146,24 @@ func runApps(args []string) error {
 	for _, app := range apps {
 		fmt.Printf("%4d  %s  %s  (updated %s)\n", app.ShortID, app.Emoji, app.Name, app.UpdatedAt)
 	}
+	return nil
+}
+
+// runAgents prints the phone's guide to building Chaaga apps — the rules
+// and chaaga.* APIs its installed version supports.
+func runAgents(args []string) error {
+	if _, err := parseCommand("agents", args, 0, 0, nil); err != nil {
+		return err
+	}
+	c, err := hostClient()
+	if err != nil {
+		return err
+	}
+	guide, err := c.getAgents()
+	if err != nil {
+		return err
+	}
+	fmt.Print(guide)
 	return nil
 }
 

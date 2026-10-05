@@ -22,6 +22,8 @@ import (
 // routes and the X-Chaaga-App-* identity headers — enough to drive the
 // one-shot commands end to end.
 type fakePhone struct {
+	noAgents bool // simulate a Chaaga build without GET /agents
+
 	mu    sync.Mutex
 	apps  map[int]*phoneApp
 	stamp int
@@ -99,6 +101,15 @@ func (p *fakePhone) serve(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(v)
 	}
 
+	if len(parts) == 1 && parts[0] == "agents" && !p.noAgents {
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		_, _ = io.WriteString(w, "# Building Chaaga apps\n\n## The app\n")
+		return
+	}
+	if len(parts) == 1 && parts[0] != "apps" {
+		writeJSON(http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
 	if len(parts) == 1 && parts[0] == "apps" {
 		switch r.Method {
 		case http.MethodGet:
@@ -605,5 +616,36 @@ func mustMkdir(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAgentsPrintsThePhonesGuide(t *testing.T) {
+	_, srv := newFakePhone(t)
+	setupCLI(t, srv)
+
+	guide, err := newHostClient(srv.URL).getAgents()
+	if err != nil || !strings.Contains(guide, "## The app") {
+		t.Fatalf("guide = %q, %v", guide, err)
+	}
+	mustRun(t, runAgents)
+}
+
+func TestAgentsOnAnOldPhoneSaysToUpdate(t *testing.T) {
+	phone, srv := newFakePhone(t)
+	phone.noAgents = true
+	setupCLI(t, srv)
+
+	if err := runAgents(nil); !errors.Is(err, errNoAgentsGuide) {
+		t.Errorf("err = %v, want errNoAgentsGuide", err)
+	}
+}
+
+func TestAgentsNeedsAHostAndNoArguments(t *testing.T) {
+	setupCLI(t, nil)
+	if err := runAgents(nil); !errors.Is(err, errNoHost) {
+		t.Errorf("err = %v, want errNoHost", err)
+	}
+	if err := runAgents([]string{"extra"}); err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Errorf("err = %v, want a usage error", err)
 	}
 }

@@ -18,6 +18,7 @@ var commands = map[string]func([]string) error{
 	"sync":    runSync,
 	"connect": runConnect,
 	"apps":    runApps,
+	"agents":  runAgents,
 	"new":     runNew,
 	"link":    runLink,
 	"pull":    runPull,
@@ -73,6 +74,8 @@ Apps:
                                        create an app and link the folder to it
   chaaga-cli link <folder> <appId>     link a folder to an existing app (no files copied)
   chaaga-cli rename <folder> <newName> [<emoji>]
+  chaaga-cli agents                    print how to build Chaaga apps: the rules and
+                                       chaaga.* APIs your phone's Chaaga supports
 
 Files (folder must be linked):
   chaaga-cli pull <folder>             copy the phone's files into the folder

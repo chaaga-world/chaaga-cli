@@ -85,6 +85,7 @@ chaaga-cli push ./my-app              # send your changes to the phone
 | --- | --- |
 | `connect [<address>]` | Saves the phone's address, or shows the saved one. |
 | `apps [--json]` | Lists the apps on the phone. |
+| `agents` | Prints how to build Chaaga apps: the rules and `chaaga.*` APIs your phone's Chaaga version supports. Meant for coding agents, handy for you too. |
 | `new <folder> <name> [<emoji>]` | Creates a new app, links the folder to it and uploads the folder's files. |
 | `link <folder> <app-id>` | Links a folder to an existing app. Copies no files. |
 | `pull <folder>` | Copies the app's files into the folder. Local files the app doesn't have are deleted. |

@@ -245,6 +245,29 @@ func (c *client) listApps() ([]appInfo, error) {
 	return decodeApp[[]appInfo](resp, http.StatusOK)
 }
 
+// errNoAgentsGuide means the phone's Chaaga predates GET /agents.
+var errNoAgentsGuide = errors.New("the Chaaga app on your phone is too old to provide its app guide — update it")
+
+// getAgents fetches the phone's guide to building Chaaga apps (Markdown).
+func (c *client) getAgents() (string, error) {
+	resp, err := c.send(http.MethodGet, c.hostURL+"/agents", nil, "")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", errNoAgentsGuide
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", statusErr(resp)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read guide: %w", err)
+	}
+	return string(body), nil
+}
+
 func (c *client) createApp(name, emoji string) (appInfo, error) {
 	body, _ := json.Marshal(map[string]string{"name": name, "emoji": emoji})
 	resp, err := c.send(http.MethodPost, c.hostURL+"/apps", body, "application/json")
