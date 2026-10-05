@@ -323,7 +323,7 @@ func TestPushChangesLogsAndReturnsWhenServerUnreachable(t *testing.T) {
 	log.SetOutput(&logs)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
-	err = pushChanges(c, dir, state)
+	_, err = pushChanges(c, dir, state)
 
 	if !strings.Contains(logs.String(), "ping:") {
 		t.Errorf("expected a logged ping failure, got %q", logs.String())
@@ -355,7 +355,7 @@ func TestPushChangesReturnsErrorWhenPingTimesOut(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "a.css"), "a")
 
-	err := pushChanges(c, dir, map[string]localFileState{})
+	_, err := pushChanges(c, dir, map[string]localFileState{})
 
 	if err == nil {
 		t.Fatal("expected a non-nil error when the ping times out")
@@ -378,7 +378,7 @@ func TestPullChangesReturnsErrorWhenPingTimesOut(t *testing.T) {
 
 	dir := t.TempDir()
 
-	err := pullChanges(c, dir, map[string]remoteFileState{})
+	_, err := pullChanges(c, dir, map[string]remoteFileState{})
 
 	if err == nil {
 		t.Fatal("expected a non-nil error when the ping times out")

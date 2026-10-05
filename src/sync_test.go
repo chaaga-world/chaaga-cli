@@ -44,7 +44,7 @@ func TestSplitArgs(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			positional, flagArgs := splitArgs(c.args, flagsWithValue)
+			positional, flagArgs := splitArgs(c.args, map[string]bool{"a": true, "appid": true, "h": true, "host": true})
 			if !reflect.DeepEqual(positional, c.wantPositional) {
 				t.Errorf("positional = %v, want %v", positional, c.wantPositional)
 			}

@@ -20,7 +20,7 @@ func isValidSiblingFilename(name string) bool {
 	if len(name) == 0 || len(name) > 128 {
 		return false
 	}
-	if name == "index.html" || name == "manifest" {
+	if name == "index.html" || name == "manifest" || name == "zip" {
 		return false
 	}
 	if strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {

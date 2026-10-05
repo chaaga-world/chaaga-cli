@@ -61,17 +61,26 @@ func isTimeout(err error) bool {
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
-// client talks to a single sub-app's slice of AppServerService's HTTP API
-// (app/lib/services/api/app_server.dart) — GET/POST/DELETE one file at a
-// time, plus the manifest route; see that file's doc comment for the full
-// route list this mirrors.
+// client talks to AppServerService's HTTP API
+// (app/lib/services/api/app_server.dart) — mostly a single sub-app's slice
+// of it (GET/POST/DELETE one file at a time, plus the manifest route), and
+// the host-level /apps routes for listing/creating apps; see that file's
+// doc comment for the full route list this mirrors.
 type client struct {
 	baseURL string // e.g. "http://192.168.1.23:8787/apps/3"
+	hostURL string // e.g. "http://192.168.1.23:8787"
 	http    *http.Client
+
+	// identity, when set, checks every per-app response's X-Chaaga-App-*
+	// headers against the folder's link — see identityGuard. Nil (as in
+	// most tests) skips the check.
+	identity *identityGuard
 }
 
-func newClient(host string, appID int) *client {
-	host = strings.TrimSuffix(host, "/")
+// hostBaseURL turns a user-supplied host ("192.168.1.23",
+// "192.168.1.23:8787", "http://...") into "http://host:port".
+func hostBaseURL(host string) string {
+	host = strings.TrimSuffix(strings.TrimSpace(host), "/")
 	scheme := "http://"
 	switch {
 	case strings.HasPrefix(host, "http://"):
@@ -83,10 +92,26 @@ func newClient(host string, appID int) *client {
 	if !strings.Contains(host, ":") {
 		host += ":8787" // matches AppServerService's own default port
 	}
+	return scheme + host
+}
+
+func newClient(host string, appID int) *client {
+	c := newHostClient(host)
+	c.setAppID(appID)
+	return c
+}
+
+// newHostClient builds a client for the host-level routes only (GET/POST
+// /apps); call setAppID before using any per-app method.
+func newHostClient(host string) *client {
 	return &client{
-		baseURL: fmt.Sprintf("%s%s/apps/%d", scheme, host, appID),
+		hostURL: hostBaseURL(host),
 		http:    &http.Client{Timeout: initialRequestTimeout},
 	}
+}
+
+func (c *client) setAppID(appID int) {
+	c.baseURL = fmt.Sprintf("%s/apps/%d", c.hostURL, appID)
 }
 
 // manifestEntry mirrors one entry of GET .../manifest's "files" array.
@@ -108,6 +133,11 @@ type manifestIndexEntry struct {
 }
 
 type manifest struct {
+	// ShortID/UID/Name identify the app served. Empty from a Chaaga build
+	// older than the /apps routes.
+	ShortID  int                 `json:"shortId"`
+	UID      string              `json:"uid"`
+	Name     string              `json:"name"`
 	HasIndex bool                `json:"hasIndex"`
 	Index    *manifestIndexEntry `json:"index"`
 	Files    []manifestEntry     `json:"files"`
@@ -162,7 +192,7 @@ func (c *client) getFile(name string) ([]byte, error) {
 }
 
 func (c *client) postIndex(body string) error {
-	resp, err := c.do(http.MethodPost, "", strings.NewReader(body))
+	resp, err := c.do(http.MethodPost, "", []byte(body))
 	if err != nil {
 		return err
 	}
@@ -174,7 +204,7 @@ func (c *client) postIndex(body string) error {
 }
 
 func (c *client) postFile(name string, body []byte) error {
-	resp, err := c.do(http.MethodPost, name, bytes.NewReader(body))
+	resp, err := c.do(http.MethodPost, name, body)
 	if err != nil {
 		return err
 	}
@@ -197,14 +227,107 @@ func (c *client) deleteFile(name string) error {
 	return nil
 }
 
-func (c *client) do(method, path string, body io.Reader) (*http.Response, error) {
-	url := c.baseURL
-	if path != "" {
-		url += "/" + path
+// appInfo mirrors one entry of GET /apps (and the POST /apps / PATCH
+// response bodies).
+type appInfo struct {
+	ShortID   int    `json:"shortId"`
+	UID       string `json:"uid"`
+	Name      string `json:"name"`
+	Emoji     string `json:"emoji"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
+func (c *client) listApps() ([]appInfo, error) {
+	resp, err := c.send(http.MethodGet, c.hostURL+"/apps", nil, "")
+	if err != nil {
+		return nil, err
 	}
-	req, err := http.NewRequest(method, url, body)
+	return decodeApp[[]appInfo](resp, http.StatusOK)
+}
+
+func (c *client) createApp(name, emoji string) (appInfo, error) {
+	body, _ := json.Marshal(map[string]string{"name": name, "emoji": emoji})
+	resp, err := c.send(http.MethodPost, c.hostURL+"/apps", body, "application/json")
+	if err != nil {
+		return appInfo{}, err
+	}
+	return decodeApp[appInfo](resp, http.StatusCreated)
+}
+
+// renameApp renames the client's current app; an empty emoji leaves it
+// unchanged.
+func (c *client) renameApp(name, emoji string) (appInfo, error) {
+	fields := map[string]string{"name": name}
+	if emoji != "" {
+		fields["emoji"] = emoji
+	}
+	body, _ := json.Marshal(fields)
+	resp, err := c.do(http.MethodPatch, "", body)
+	if err != nil {
+		return appInfo{}, err
+	}
+	return decodeApp[appInfo](resp, http.StatusOK)
+}
+
+func decodeApp[T any](resp *http.Response, want int) (T, error) {
+	defer resp.Body.Close()
+	var v T
+	if resp.StatusCode != want {
+		return v, statusErr(resp)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+		return v, fmt.Errorf("decode response: %w", err)
+	}
+	return v, nil
+}
+
+// do sends a per-app request (path is relative to baseURL; "" for the
+// index). When an identityGuard is set, a response that turns out to come
+// from a different app than the folder's link is resolved — retried once
+// against the app's new shortId, or turned into an error — before the
+// caller ever sees it.
+func (c *client) do(method, path string, body []byte) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		resp, err := c.send(method, c.appURL(path), body, "")
+		if err != nil {
+			return nil, err
+		}
+		if c.identity == nil {
+			return resp, nil
+		}
+		retry, err := c.identity.check(c, method, resp)
+		if err != nil {
+			resp.Body.Close()
+			return nil, err
+		}
+		if !retry {
+			return resp, nil
+		}
+		resp.Body.Close()
+		if attempt > 0 {
+			return nil, fmt.Errorf("%s %s: the phone keeps answering for a different app", method, c.appURL(path))
+		}
+	}
+}
+
+func (c *client) appURL(path string) string {
+	if path == "" {
+		return c.baseURL
+	}
+	return c.baseURL + "/" + path
+}
+
+func (c *client) send(method, url string, body []byte, contentType string) (*http.Response, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequest(method, url, reader)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

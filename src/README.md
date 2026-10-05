@@ -4,15 +4,15 @@ The Go module behind the `chaaga-cli` CLI. End-user docs (install, usage)
 live one level up in [`../README.md`](../README.md); this file is for building,
 testing, and releasing.
 
-> This directory is meant to graduate into its own repository. Keep it
-> self-contained — no imports from the rest of the `chaaga` monorepo.
 
 ## Layout
 
 | File / dir       | What it is                                                        |
 | ---------------- | ---------------------------------------------------------------- |
-| `main.go`        | CLI entry point, arg dispatch, `version` subcommand, build vars  |
-| `sync.go`        | `runSync` — flag parsing, source-of-truth prompt, the poll loop  |
+| `main.go`        | CLI entry point, command dispatch, exit codes, build vars        |
+| `oneshot.go`     | One-shot commands: `connect`, `apps`, `new`, `link`, `pull`, `status`, `push`, `rename` |
+| `config.go`      | Global config (phone host), `.chaaga.yaml` link, `.chaaga.state` baseline, identity guard |
+| `sync.go`        | `runSync` — source-of-truth prompt, the poll loop                |
 | `client.go`      | HTTP client for the Chaaga app's local-network API               |
 | `mirror.go`      | Directory ↔ app diffing, push/pull of file sets                  |
 | `filename.go`    | Filename validation / sanitisation shared by both directions     |
@@ -36,7 +36,9 @@ go build -o chaaga-cli .
 stray binary to clean up:
 
 ```sh
-go run . sync ./apps/zombies -a 3 -h 192.168.1.23
+go run . connect 192.168.1.23
+go run . link ./apps/zombies 3
+go run . sync ./apps/zombies
 ```
 
 ## Test

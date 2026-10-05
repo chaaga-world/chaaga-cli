@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -151,8 +153,9 @@ func pullAll(c *client, dir string) (map[string]remoteFileState, error) {
 // from state that's drifted for any reason by just re-pushing everything.
 // Returns non-nil only when pushChanges' ping times out — see its doc
 // comment — in which case this stops watching entirely rather than
-// retrying forever; runSync surfaces that error and exits.
-func watchPush(ctx context.Context, c *client, dir string, state map[string]localFileState, interval time.Duration, reload <-chan struct{}) error {
+// retrying forever; runSync surfaces that error and exits. onChange, if
+// set, runs after every pass that pushed or deleted something.
+func watchPush(ctx context.Context, c *client, dir string, state map[string]localFileState, interval time.Duration, reload <-chan struct{}, onChange func()) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -167,9 +170,14 @@ func watchPush(ctx context.Context, c *client, dir string, state map[string]loca
 				continue
 			}
 			state = newState
+			notify(onChange)
 		case <-ticker.C:
-			if err := pushChanges(c, dir, state); err != nil {
+			changed, err := pushChanges(c, dir, state)
+			if err != nil {
 				return err
+			}
+			if changed {
+				notify(onChange)
 			}
 		}
 	}
@@ -183,7 +191,8 @@ func watchPush(ctx context.Context, c *client, dir string, state map[string]loca
 // timeout specifically means the app genuinely isn't answering (see
 // isTimeout's doc comment), which no amount of retrying fixes, so
 // watchPush stops instead of looping forever against a dead server.
-func pushChanges(c *client, dir string, state map[string]localFileState) error {
+// changed reports whether anything was pushed or deleted.
+func pushChanges(c *client, dir string, state map[string]localFileState) (changed bool, err error) {
 	// Push mode is local-authoritative, so nothing below actually needs the
 	// manifest — but unlike pullChanges (which always fetches it as its own
 	// poll), a tick with no local changes would otherwise touch the network
@@ -194,19 +203,19 @@ func pushChanges(c *client, dir string, state map[string]localFileState) error {
 	// (or pressing R) would ever surface the failure. Fetching here instead
 	// makes every tick a ping, matching pull mode's cadence.
 	if _, err := c.getManifest(); err != nil {
-		if isTimeout(err) {
-			return fmt.Errorf("ping: %w", err)
+		if isTimeout(err) || isAppGone(err) {
+			return false, fmt.Errorf("ping: %w", err)
 		}
 		log.Printf("ping: %v", err)
-		return nil
+		return false, nil
 	}
 
-	pushIndexIfChanged(c, dir, state)
+	changed = pushIndexIfChanged(c, dir, state)
 
 	entries, err := localSiblingFiles(dir)
 	if err != nil {
 		log.Printf("list local files: %v", err)
-		return nil
+		return changed, nil
 	}
 	for name, info := range entries {
 		prev, seen := state[name]
@@ -223,6 +232,7 @@ func pushChanges(c *client, dir string, state map[string]localFileState) error {
 			continue
 		}
 		state[name] = localFileState{size: info.Size(), modTime: info.ModTime()}
+		changed = true
 		log.Printf("pushed %s (changed)", name)
 	}
 	// indexFilename is tracked in state too (see pushIndexIfChanged) but has
@@ -240,41 +250,43 @@ func pushChanges(c *client, dir string, state map[string]localFileState) error {
 			continue
 		}
 		delete(state, name)
+		changed = true
 		log.Printf("deleted remote %s (removed locally)", name)
 	}
-	return nil
+	return changed, nil
 }
 
 // pushIndexIfChanged re-pushes index.html only if its size/mtime differ
 // from what state last recorded — the same change-detection sibling files
 // already get, rather than blindly re-posting it every single tick (which
 // also meant a successful push never logged anything, silently, since
-// there was no "changed" event to report).
-func pushIndexIfChanged(c *client, dir string, state map[string]localFileState) {
+// there was no "changed" event to report). Reports whether it pushed.
+func pushIndexIfChanged(c *client, dir string, state map[string]localFileState) bool {
 	indexPath := filepath.Join(dir, indexFilename)
 	if !fileExists(indexPath) {
 		delete(state, indexFilename)
-		return
+		return false
 	}
 	info, err := os.Stat(indexPath)
 	if err != nil {
 		log.Printf("stat %s: %v", indexFilename, err)
-		return
+		return false
 	}
 	if prev, seen := state[indexFilename]; seen && prev.size == info.Size() && prev.modTime.Equal(info.ModTime()) {
-		return
+		return false
 	}
 	body, err := os.ReadFile(indexPath)
 	if err != nil {
 		log.Printf("read %s: %v", indexFilename, err)
-		return
+		return false
 	}
 	if err := c.postIndex(string(body)); err != nil {
 		log.Printf("push %s: %v", indexFilename, err)
-		return
+		return false
 	}
 	state[indexFilename] = localFileState{size: info.Size(), modTime: info.ModTime()}
 	log.Printf("pushed %s (changed)", indexFilename)
+	return true
 }
 
 // watchPull polls the remote manifest every interval, forever (until ctx is
@@ -285,8 +297,9 @@ func pushIndexIfChanged(c *client, dir string, state map[string]localFileState) 
 // Returns non-nil only when pullChanges' manifest fetch (its own ping —
 // see watchPush's doc comment) times out, in which case this stops
 // watching entirely rather than retrying forever; runSync surfaces that
-// error and exits.
-func watchPull(ctx context.Context, c *client, dir string, state map[string]remoteFileState, interval time.Duration, reload <-chan struct{}) error {
+// error and exits. onChange, if set, runs after every pass that pulled or
+// removed something.
+func watchPull(ctx context.Context, c *client, dir string, state map[string]remoteFileState, interval time.Duration, reload <-chan struct{}, onChange func()) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -301,9 +314,14 @@ func watchPull(ctx context.Context, c *client, dir string, state map[string]remo
 				continue
 			}
 			state = newState
+			notify(onChange)
 		case <-ticker.C:
-			if err := pullChanges(c, dir, state); err != nil {
+			changed, err := pullChanges(c, dir, state)
+			if err != nil {
 				return err
+			}
+			if changed {
+				notify(onChange)
 			}
 		}
 	}
@@ -315,15 +333,15 @@ func watchPull(ctx context.Context, c *client, dir string, state map[string]remo
 // accumulated since state. Returns non-nil only when that fetch times out
 // — every other failure is just logged and swallowed, same as before; see
 // pushChanges' identical reasoning for why a timeout specifically is
-// different.
-func pullChanges(c *client, dir string, state map[string]remoteFileState) error {
+// different. changed reports whether anything was pulled or removed.
+func pullChanges(c *client, dir string, state map[string]remoteFileState) (changed bool, err error) {
 	m, err := c.getManifest()
 	if err != nil {
-		if isTimeout(err) {
-			return fmt.Errorf("ping: %w", err)
+		if isTimeout(err) || isAppGone(err) {
+			return false, fmt.Errorf("ping: %w", err)
 		}
 		log.Printf("fetch manifest: %v", err)
-		return nil
+		return false, nil
 	}
 
 	if !m.HasIndex {
@@ -338,6 +356,7 @@ func pullChanges(c *client, dir string, state map[string]remoteFileState) error 
 				log.Printf("write %s: %v", indexFilename, err)
 			} else {
 				state[indexFilename] = remoteFileState{size: m.Index.Size, modifiedAt: m.Index.ModifiedAt}
+				changed = true
 				log.Printf("pulled %s (changed)", indexFilename)
 			}
 		}
@@ -360,6 +379,7 @@ func pullChanges(c *client, dir string, state map[string]remoteFileState) error 
 			continue
 		}
 		state[f.Name] = remoteFileState{size: f.Size, modifiedAt: f.ModifiedAt}
+		changed = true
 		log.Printf("pulled %s (changed)", f.Name)
 	}
 	// indexFilename is tracked in state too (handled above) but was never
@@ -374,9 +394,10 @@ func pullChanges(c *client, dir string, state map[string]remoteFileState) error 
 			continue
 		}
 		delete(state, name)
+		changed = true
 		log.Printf("removed local %s (removed remotely)", name)
 	}
-	return nil
+	return changed, nil
 }
 
 // warnedSkips tracks which skip warnings localSiblingFiles has already
@@ -416,7 +437,9 @@ func localSiblingFiles(dir string) (map[string]os.FileInfo, error) {
 			}
 			continue
 		}
-		if name == indexFilename {
+		// This CLI's own .chaaga.yaml/.chaaga.state belong to the folder,
+		// not the app — never pushed, never deleted by a pull.
+		if name == indexFilename || isCLIFile(name) {
 			continue
 		}
 		if !isValidSiblingFilename(name) {
@@ -433,6 +456,148 @@ func localSiblingFiles(dir string) (map[string]os.FileInfo, error) {
 		result[name] = info
 	}
 	return result, nil
+}
+
+func notify(onChange func()) {
+	if onChange != nil {
+		onChange()
+	}
+}
+
+func isAppGone(err error) bool {
+	var gone *appGoneError
+	return errors.As(err, &gone)
+}
+
+// buildState records the baseline after a pull or push: for every file
+// present both on the phone and locally (which, right after a mirror pass,
+// is every file), the phone's modifiedAt and the local content hash.
+func buildState(c *client, dir string) (syncState, error) {
+	m, err := c.getManifest()
+	if err != nil {
+		return nil, fmt.Errorf("fetch manifest: %w", err)
+	}
+	state := syncState{}
+	for name, modifiedAt := range remoteStamps(m) {
+		sum, err := hashFile(filepath.Join(dir, name))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("hash %s: %w", name, err)
+		}
+		state[name] = fileBaseline{ModifiedAt: modifiedAt, SHA256: sum}
+	}
+	return state, nil
+}
+
+func remoteStamps(m *manifest) map[string]string {
+	stamps := make(map[string]string, len(m.Files)+1)
+	if m.HasIndex && m.Index != nil {
+		stamps[indexFilename] = m.Index.ModifiedAt
+	}
+	for _, f := range m.Files {
+		stamps[f.Name] = f.ModifiedAt
+	}
+	return stamps
+}
+
+func localHashes(dir string) (map[string]string, error) {
+	entries, err := localSiblingFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries)+1)
+	for name := range entries {
+		names = append(names, name)
+	}
+	if fileExists(filepath.Join(dir, indexFilename)) {
+		names = append(names, indexFilename)
+	}
+	hashes := make(map[string]string, len(names))
+	for _, name := range names {
+		sum, err := hashFile(filepath.Join(dir, name))
+		if err != nil {
+			return nil, fmt.Errorf("hash %s: %w", name, err)
+		}
+		hashes[name] = sum
+	}
+	return hashes, nil
+}
+
+// fileChange is one side's change to a file since the baseline.
+type fileChange struct {
+	Name string
+	Kind string // "added", "modified" or "deleted"
+}
+
+// changeSet is what changed on each side since the last pull/push.
+// Conflicts are files changed on both sides.
+type changeSet struct {
+	Local, Remote []fileChange
+	Conflicts     []string
+}
+
+// diffState compares the phone (manifest) and the folder against state.
+// A missing state (nil) makes every file on the phone count as changed
+// there, so push refuses rather than overwrite something unseen.
+func diffState(c *client, dir string, state syncState) (changeSet, error) {
+	m, err := c.getManifest()
+	if err != nil {
+		return changeSet{}, fmt.Errorf("fetch manifest: %w", err)
+	}
+	remote := remoteStamps(m)
+	local, err := localHashes(dir)
+	if err != nil {
+		return changeSet{}, err
+	}
+
+	names := map[string]bool{}
+	for name := range state {
+		names[name] = true
+	}
+	for name := range remote {
+		names[name] = true
+	}
+	for name := range local {
+		names[name] = true
+	}
+	sorted := make([]string, 0, len(names))
+	for name := range names {
+		sorted = append(sorted, name)
+	}
+	sort.Strings(sorted)
+
+	var cs changeSet
+	for _, name := range sorted {
+		base, inBase := state[name]
+		modifiedAt, onPhone := remote[name]
+		sum, onDisk := local[name]
+		remoteKind := changeKind(inBase, onPhone, inBase && onPhone && modifiedAt != base.ModifiedAt)
+		localKind := changeKind(inBase, onDisk, inBase && onDisk && sum != base.SHA256)
+		if remoteKind != "" {
+			cs.Remote = append(cs.Remote, fileChange{name, remoteKind})
+		}
+		if localKind != "" {
+			cs.Local = append(cs.Local, fileChange{name, localKind})
+		}
+		if remoteKind != "" && localKind != "" {
+			cs.Conflicts = append(cs.Conflicts, name)
+		}
+	}
+	return cs, nil
+}
+
+func changeKind(inBase, present, modified bool) string {
+	switch {
+	case !inBase && present:
+		return "added"
+	case inBase && !present:
+		return "deleted"
+	case modified:
+		return "modified"
+	}
+	return ""
 }
 
 func fileExists(path string) bool {

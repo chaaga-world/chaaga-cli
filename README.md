@@ -56,31 +56,60 @@ clear that once with `xattr -d com.apple.quarantine chaaga-cli`.
 [Releases page](https://github.com/chaaga-world/chaaga-cli/releases) and
 rename it to `chaaga-cli.exe`.
 
-## Find your app's ID and address
+## Connect to your phone (once)
 
-In Chaaga, on your phone, open the app you want to sync and tap the **Expert mode** icon in the header.
-That screen shows two things you need:
+In Chaaga, on your phone, open any app and tap the **Expert mode** icon in
+the header. The API tab shows your phone's **address** on the network, like
+`192.168.1.23`, and the app's **ID**, a small number.
 
-- **App ID** — a small number (the app's `shortId`).
-- **Address** — your phone's address on the network, like `192.168.1.23`.
+```sh
+chaaga-cli connect 192.168.1.23
+```
+
+The first time, Chaaga asks you on the phone to allow the connection;
+approve it. The address is saved, so no other command needs it. If your
+phone's address changes, run `connect` again.
 
 ## Use it
 
 ```sh
-./chaaga-cli sync <folder> -a <app-id> -h <address>
+chaaga-cli apps                       # list the apps on your phone
+chaaga-cli link ./my-app 3            # link a folder to app 3 (no files copied yet)
+chaaga-cli pull ./my-app              # copy the app's files into the folder
+# ...edit in your editor...
+chaaga-cli status ./my-app            # see what changed on each side
+chaaga-cli push ./my-app              # send your changes to the phone
 ```
 
-Example:
+| Command | What it does |
+| --- | --- |
+| `connect [<address>]` | Saves the phone's address, or shows the saved one. |
+| `apps [--json]` | Lists the apps on the phone. |
+| `new <folder> <name> [<emoji>]` | Creates a new app, links the folder to it and uploads the folder's files. |
+| `link <folder> <app-id>` | Links a folder to an existing app. Copies no files. |
+| `pull <folder>` | Copies the app's files into the folder. Local files the app doesn't have are deleted. |
+| `status <folder>` | Shows what changed locally and on the phone since the last pull/push. |
+| `push <folder> [--force]` | Copies the folder to the phone. Refuses if the app also changed on the phone (say, through the in-app chat) unless you add `--force`. |
+| `rename <folder> <new-name> [<emoji>]` | Renames the app. |
+| `sync <folder>` | Keeps syncing live in one direction until you stop it. See below. |
+
+Quote names with spaces: `chaaga-cli new ./game "My Game" 🎮`.
+
+A linked folder holds two small files: `.chaaga.yaml` (which app it belongs
+to) and `.chaaga.state` (what each file looked like at the last sync, so
+`push` can spot changes made on the phone). Neither is ever uploaded.
+
+Exit codes: `0` ok, `1` error, `3` conflict (`status`/`push`), `4` the
+folder's app was deleted from the phone. In that case run `chaaga-cli apps`
+and `chaaga-cli link <folder> <app-id>` to relink.
+
+### Live sync
 
 ```sh
-./chaaga-cli sync ./my-app -a 3 -h 192.168.1.23
+chaaga-cli sync ./my-app
 ```
 
-- `<folder>` — the folder on your computer to sync (created if it doesn't
-  exist).
-- `-a` — the **App ID** from the API tab.
-- `-h` — the **Address** from the API tab. Just the address is fine (it uses
-  port `8787`); add `:port` only if the API tab shows a different one.
+The folder must be linked first (`link` or `new`).
 
 ### Choose a direction
 
@@ -117,13 +146,32 @@ so there's never a conflict to sort out.
 - **Same network only.** No syncing over the internet — phone and computer
   must share the Wi-Fi network. There's no encryption, so use it on networks
   you trust.
-- **One direction at a time.** `chaaga-cli` never merges the two sides. The
-  side you didn't pick as source of truth just gets overwritten to match.
+- **One direction at a time.** `chaaga-cli` never merges the two sides. With
+  `sync`, the side you didn't pick as source of truth gets overwritten to
+  match; `push` and `pull` overwrite the other side too, but `push` first
+  checks that the phone hasn't changed since your last sync.
+- **A folder remembers its app.** If you delete an app on the phone and its
+  number gets reused by another app, the CLI stops (exit `4`) instead of
+  overwriting the wrong one.
 - **It exits if the app stops responding.** If your phone drops off Wi-Fi or
   you close Chaaga, `chaaga-cli` stops rather than waiting forever. Just run
   it again once the app is reachable.
 - **Changes aren't instant.** Edits are picked up within a second or two —
   it checks on a timer. Press `R` if you don't want to wait.
+
+## Use it with Claude Code
+
+Install the Chaaga plugin, then ask Claude to work on your app, for example
+"pull Chaaga app 3 into ./my-app and add a dark mode":
+
+```
+/plugin marketplace add chaaga-world/chaaga-cli
+/plugin install chaaga@chaaga
+```
+
+The plugin teaches Claude to use the commands above. It asks before
+installing `chaaga-cli` or overwriting anything. Not using plugins? Copy
+[`skills/chaaga-app/`](skills/chaaga-app/) into `~/.claude/skills/`.
 
 ---
 

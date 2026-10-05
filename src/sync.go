@@ -40,51 +40,48 @@ func (s source) String() string {
 	return "local folder"
 }
 
-// flagsWithValue lists every runSync flag that consumes a following value
-// token (all of them — there are no boolean flags here), by both its short
-// and long name. Used by splitArgs to correctly pull flag/value pairs out
-// regardless of where they fall relative to the folder-path positional
-// argument.
-var flagsWithValue = map[string]bool{"a": true, "appid": true, "h": true, "host": true}
-
 // runSync implements the `sync` subcommand — see main.go's usage() for the
-// exact flag/positional shape.
+// exact shape. The folder must already be linked (`link` or `new`); the
+// phone's host comes from the global config (`connect`).
 func runSync(args []string) error {
-	positional, flagArgs := splitArgs(args, flagsWithValue)
-
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
+		switch name, _, _ := strings.Cut(strings.TrimLeft(arg, "-"), "="); name {
+		case "h", "host":
+			return fmt.Errorf("%s is no longer supported — set the phone once with: chaaga-cli connect <phone-ip>", arg)
+		case "a", "appid":
+			return fmt.Errorf("%s is no longer supported — link the folder once with: chaaga-cli link <folder> <appId>", arg)
+		}
+	}
+	positional, flagArgs := splitArgs(args, nil)
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
-	appID := fs.Int("a", 0, "the sub-app's shortId (also -appid)")
-	fs.IntVar(appID, "appid", 0, "the sub-app's shortId (also -a)")
-	host := fs.String("h", "", "the phone's LAN address, host or host:port (also -host)")
-	fs.StringVar(host, "host", "", "the phone's LAN address, host or host:port (also -h)")
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
 	}
 	if len(positional) != 1 {
 		return fmt.Errorf("expected exactly one folder path argument, got %d", len(positional))
 	}
-	dir := positional[0]
-	if *appID == 0 {
-		return fmt.Errorf("-a/-appid is required")
-	}
-	if *host == "" {
-		return fmt.Errorf("-h/-host is required")
-	}
-
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create/open folder %s: %w", dir, err)
-	}
-	absDir, err := filepath.Abs(dir)
+	absDir, err := filepath.Abs(positional[0])
 	if err != nil {
 		return fmt.Errorf("resolve folder path: %w", err)
+	}
+
+	c, link, err := linkedClient(absDir)
+	if err != nil {
+		return err
+	}
+	// Checks the link before anything else happens (and triggers the
+	// approval prompt here rather than mid-sync).
+	if _, err := c.getManifest(); err != nil {
+		return err
 	}
 
 	sourceOfTruth, err := promptSourceOfTruth(os.Stdin, os.Stdout)
 	if err != nil {
 		return err
 	}
-
-	c := newClient(*host, *appID)
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
@@ -117,7 +114,19 @@ func runSync(args []string) error {
 		}
 	}()
 
-	log.Printf("syncing %s <-> app %d at %s (source of truth: %s)", absDir, *appID, *host, sourceOfTruth)
+	// Keeps .chaaga.state current, so `status`/`push` work right after a
+	// sync session without reporting our own changes as conflicts.
+	refreshState := func() {
+		state, err := buildState(c, absDir)
+		if err == nil {
+			err = saveState(absDir, state)
+		}
+		if err != nil {
+			log.Printf("update %s: %v", stateFilename, err)
+		}
+	}
+
+	log.Printf("syncing %s <-> app %d %q (source of truth: %s)", absDir, link.AppID, link.Name, sourceOfTruth)
 	switch sourceOfTruth {
 	case sourceApp:
 		state, err := pullAll(c, absDir)
@@ -127,9 +136,10 @@ func runSync(args []string) error {
 		// Approval is already established (pullAll just succeeded) — see
 		// watchRequestTimeout's doc comment for why the watch loop uses a
 		// much shorter timeout than the initial pass.
+		refreshState()
 		c.setTimeout(watchRequestTimeout)
 		log.Printf("initial pull complete, watching the app for changes (Ctrl+C to stop, R to force a full reload)")
-		if err := watchPull(ctx, c, absDir, state, pullPollInterval, reload); err != nil {
+		if err := watchPull(ctx, c, absDir, state, pullPollInterval, reload, refreshState); err != nil {
 			return fmt.Errorf("watch pull: %w", err)
 		}
 	case sourceLocal:
@@ -137,9 +147,10 @@ func runSync(args []string) error {
 		if err != nil {
 			return fmt.Errorf("initial push: %w", err)
 		}
+		refreshState()
 		c.setTimeout(watchRequestTimeout)
 		log.Printf("initial push complete, watching %s for changes (Ctrl+C to stop, R to force a full reload)", absDir)
-		if err := watchPush(ctx, c, absDir, state, pushPollInterval, reload); err != nil {
+		if err := watchPush(ctx, c, absDir, state, pushPollInterval, reload, refreshState); err != nil {
 			return fmt.Errorf("watch push: %w", err)
 		}
 	}
